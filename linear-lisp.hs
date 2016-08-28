@@ -11,7 +11,7 @@ data Expr =
   Symbol String |
   Num Int
 
-
+-- default show instances aren't pretty enough
 instance Show Expr where
   show (Lambda s body) = "(\\" ++ s ++ " -> " ++
                            (show body) ++ ")"
@@ -20,6 +20,12 @@ instance Show Expr where
   show (Symbol s) = s
   show (Num n) = (show n)
 
+type Env = [String]
+
+-- get free variables for an expression
+
+freeVars :: Expr -> Env -> [Expr] 
+  
 freeVars (Lambda arg body) env =
   freeVars body (arg:env)
 
@@ -31,12 +37,12 @@ freeVars (Begin exprs) env =
 
 freeVars (Symbol name) env =
   case (elemIndex name env) of
-    Just a -> []
+    Just _ -> []
     Nothing -> [(Symbol name)]
 
-freeVars (Num i) env = []
+freeVars (Num _) _ = []
 
-type Env = [String]
+
 
 
 -- analyzed expression
@@ -48,7 +54,7 @@ data AExpr =
   ASymbol String Int |
   ANum Int
 
-           
+-- same as above
 instance Show AExpr where
   show (ALambda s body) = ("(\\" ++ s ++ " -> " ++
                            (show body) ++ ")")
@@ -59,9 +65,12 @@ instance Show AExpr where
       (show body) ++ ")")
   show (AApp e1 e2) = "(" ++ (show e1) ++ " " ++ (show e2) ++ ")" 
   show (ABegin exps) = (foldl (++) [] (intersperse " " (map show exps)))
-  show (ASymbol s off) = s
+  show (ASymbol s _) = s
   show (ANum i) = (show i)
 
+-- analyzes symbol references (determines static offset into environment)
+-- differentiates closures and combinators (lambdas without free variables)
+-- calculates free variables for closures
 analyze :: Expr -> Env -> AExpr
 analyze (Lambda arg body) env =
   case (freeVars body [arg]) of
@@ -80,10 +89,11 @@ analyze (Symbol name) env =
     Just a -> (ASymbol name a)
     Nothing -> error $ "Symbol '" ++ name ++ "' is unbound."
 
-analyze (Num i) env =
+analyze (Num i) _ =
   (ANum i)
 
--- preliminary code, no integer addresses
+-- preliminary 'byte' code for a stack machine,
+-- uses nested code sequences, no integer addresses
 data PCode =
   CLit Int |
   CClosure Int [PCode] | -- num-free-vars code-address 
@@ -96,20 +106,7 @@ data PCode =
   CLabel String |
   CRet
 
--- represents items on the stack
--- helps us keep track what would be on the runtime stack at certain
--- points, while compiling
-
-
-data StackEl =
-  -- a value, not a bound variable in this scope
-  -- (could just be intermediate data, a return value, etc)
-  NoStkVar |
-  -- some variable bound in this scope
-  StkVar String
-
-type CStk = [StackEl] 
-
+-- pretty printing
 instance Show PCode where
   show (CLit a) = "(Lit " ++ (show a) ++ ")"
   show (CClosure numArgs body) =
@@ -125,23 +122,43 @@ instance Show PCode where
   show (CRet) = "(Ret)"
 
 
-generateFreeVarsCode [] stk =
+
+-- represents items on the stack
+-- helps us keep track what would be on the runtime stack at certain
+-- points, while compiling
+
+-- this whole strategy is kind of hacky and i'd like to improve it at
+-- some point but it works
+data StackEl =
+  -- a value, not a bound variable in this scope
+  -- (could just be intermediate data, a return value, etc)
+  NoStkVar |
+  -- some variable bound in this scope
+  StkVar String
+  deriving (Show)
+
+
+type CStk = [StackEl] 
+
+foldCode _ [] stk =
   ([], stk)
 
-generateFreeVarsCode (v:vs) stk =
-  let (code, nstk) = (generate v stk) in
-  let (rcode, rstk) = (generateFreeVarsCode vs nstk) in
-  (code ++ rcode, rstk)
+foldCode f (exp:exprs) stk =
+  let (code, stk') = f exp stk in
+  let (recCode ,stk'') = foldCode f exprs stk' in
+  (code ++ recCode, stk'')
+  
 
-getFreeVarsStack [] = []
+symToStackVar (ASymbol s _) = (StkVar s)
 
-getFreeVarsStack ((ASymbol s off):vs) =
-  ((True, s): (getFreeVarsStack vs))
+-- determines initial stack for a closure
+-- we ignore anything below this on the stack
+getClosureStack (AClosure arg freeVars _) =
+  -- get names of free vars and push on stack
+  ((StkVar arg):(map symToStackVar freeVars))
 
-getClosureStack (AClosure arg freeVars body) =
-  ((True, arg):(getFreeVarsStack freeVars))
 
-
+-- compile-time roll emulation
 rollStack stk 0 =
   stk
 
@@ -153,8 +170,7 @@ rollStack (a:as) idx =
 
 
 -- generate preliminary stack machine code
--- doesn't have integer addresses
-
+-- doesn't have integer addresses!
 generate :: AExpr -> CStk -> ([PCode], CStk)
 generate (ALambda name body) stk =
   let (bodyCode, lstk) = (generate body [(StkVar name)]) in
@@ -167,11 +183,12 @@ generate (ALambda name body) stk =
   
 generate (AClosure name fvs body) stk =
   let beforeClosureStack = (getClosureStack (AClosure name fvs body)) in
-  let (fvsCode, fvsStk) = (generateFreeVarsCode fvs stk) in
+  let (fvsCode, fvsStk) = (foldCode generate fvs stk) in
   let (bodyCode, clsStk) = (generate body beforeClosureStack) in
   if (length clsStk) == 1
-  then ([(CClosure (length fvs) (bodyCode ++ [(CRet)]))],
-        ((False, ""):(drop (length fvs) fvsStk)))
+  then (fvsCode ++ [(CClosure (length fvs) (bodyCode ++ [(CRet)]))],
+
+        ((NoStkVar):(drop (length fvs) fvsStk)))
   --trace ("Stack at beginning of closure " ++ (show (AClosure name fvs body)) ++
   --       ": " ++ (show beforeClosureStack) ++ 
   --       "\nStack after calling closure " ++ (show (AClosure name fvs body)) ++
@@ -183,7 +200,7 @@ generate (AApp e1 e2) stk =
   let (ocode, nstk) = (generate e2 stk) in
   let (fcode, nstk2) = (generate e1 nstk) in
   
-  ((ocode++fcode++[(CApply)]) , (False, ""):(drop 2 nstk))
+  ((ocode++fcode++[(CApply)]) , (NoStkVar):(drop 2 nstk2))
 
 generate (ABegin []) stk =
   ([], stk)
@@ -197,8 +214,11 @@ generate (ABegin (e:es)) stk =
   ((ecode ++ [(CDrop)] ++ rcode), rstk)
 
 
-generate (ASymbol name off) stk =
-  case (findIndex (\(isVar,sName) -> name == sName) stk) of
+generate (ASymbol name _) stk =
+  case (findIndex (\ el ->
+                    case el of
+                      NoStkVar -> False
+                      (StkVar sname) -> name == sname) stk) of
     Nothing -> error $ "Can't find symbol '" ++ (show name) ++ "' on stack!"
     Just idx ->
       if idx == 0
@@ -206,7 +226,7 @@ generate (ASymbol name off) stk =
       else ([(CRoll idx)], (rollStack stk idx))
 
 generate (ANum i) stk =
-  ([(CLit i)], ((False, ""):stk))
+  ([(CLit i)], (NoStkVar:stk))
 
 
 peep ((CRoll 1):(CRoll 1):rst) = (peep rst)
@@ -267,7 +287,7 @@ instance Show ECode where
 translate :: [PCode] -> [ECode]
 
 translate code = 
-  let (translatedCode, map, off) = translate' code [] 0 in
+  let (translatedCode, _, _) = translate' code [] 0 in
   translatedCode
   where
     --translateSimple :: (Maybe ECode) -> [PCode] -> LabelMap -> Int -> ([ECode], LabelMap, Int)
@@ -309,22 +329,49 @@ translate code =
       translateSimple
       (Just (EDelayedJump
              (\map ->
-               case (find (\(name,int) -> name == l) map) of
-                 Just (name, int) -> int
+               case (find (\(name,_) -> name == l) map) of
+                 Just (_, int) -> int
                  Nothing -> error $ "Label " ++ (show l) ++ " used but not defined!"
              )))
       rs map off
     
     translate' ((CLabel l):rs) map off =
-      case (find (\(name, int) -> name == l) map) of 
-        Just a -> error $ "Label " ++ (show l) ++ " defined multiple times!" 
+      case (find (\(name, _) -> name == l) map) of 
+        Just _ -> error $ "Label " ++ (show l) ++ " defined multiple times!" 
         Nothing -> translateSimple Nothing rs ((l, off):map) off
 
     translate' ((CRet):rs) map off =
       translateSimple (Just (ERet)) rs map off
 
     translate' [] map off = ([], map, off)
+
+-- runtime objects
+data RObject =
+  RNum Int |
+  RClosure [RObject] Int |
+  RLambda Int
+
+
+
+-- execute :: ECode -> [RObject]
+
+-- execute code =
+--   --let codeLen = (length code) in
+--   -- we use a single stack only
+--   recur 0 code []
+--   where
+--     codeLen = (length code)
+--     recur pc stk =
+--       if pc >= codeLen
+--       then stk
+--       else (uncurry recur) (inner (code !! pc) pc stk)
+      
+--     inner (ELit i) pc stk =
+--       (pc+1, ((RNum):stk))
+--     --inner (EClosure num addr) stk =
+--     --  (take num stk) (drop num stk)
   
+    
 main = 
   let expr =
         -- (App (App (Lambda "x" (Lambda "y" (Begin [(Symbol "y"), (Symbol "x")])))
