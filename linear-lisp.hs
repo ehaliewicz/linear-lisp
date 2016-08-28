@@ -6,23 +6,24 @@ import Debug.Trace
 
 
 data Expr =
-  Lambda String Expr |
-  App Expr Expr |
+  Lambda [String] Expr |
+  App Expr [Expr] |
   Begin [Expr] |
   If Expr Expr Expr |
   Symbol String |
   Num Int |
+  Float Double |
   Boolean Bool |
+  Copy Expr |
   Nil
 
 -- default show instances aren't pretty enough
 instance Show Expr where
-  show (Lambda s body) = "(\\" ++ s ++ " -> " ++
+  show (Lambda s body) = "(\\" ++ (concat (intersperse ", " (map show s))) ++ " -> " ++
                            (show body) ++ ")"
   show (App e1 e2) = "(" ++ (show e1) ++ " " ++ (show e2) ++ ")" 
-  show (Begin exps) = (foldl (++) [] (intersperse " " (map show exps)))
-  show (If tst e2 e3) = "(if " ++ (foldl (++) []
-                                   (intersperse " " (map show [tst, e2, e3])))
+  show (Begin exps) = (concat (intersperse " " (map show exps)))
+  show (If tst e2 e3) = "(if " ++ (concat (intersperse " " (map show [tst, e2, e3])))
   show (Symbol s) = s
   show (Num n) = (show n)
   show (Boolean b) = (show b)
@@ -84,7 +85,7 @@ freeVars (App operator operand) env =
   (freeVars operator env) ++ (freeVars operand env)
 
 freeVars (Begin exprs) env =
-  (foldl (++) [] (map (\x -> (freeVars x env)) exprs))
+  (concat (map (\x -> (freeVars x env)) exprs))
 
 freeVars (Symbol name) env =
   case (elemIndex name env) of
@@ -92,7 +93,7 @@ freeVars (Symbol name) env =
     Nothing -> [(Symbol name)]
 
 freeVars (If e1 e2 e3) env =
-  foldl (++) [] (map (\x -> freeVars x env) [e1,e2,e3])
+  concat (map (\x -> freeVars x env) [e1,e2,e3])
 
 freeVars (Num _) _ = []
                      
@@ -120,13 +121,13 @@ instance Show AExpr where
                            (show body) ++ ")")
   show (AClosure s fvs body) =
     ("(\\" ++ s ++ " {" ++
-     (foldl (++) [] (intersperse "," (map show fvs))) ++
+     (concat (intersperse "," (map show fvs))) ++
       "} " ++
       (show body) ++ ")")
   show (AApp e1 e2) = "(" ++ (show e1) ++ " " ++ (show e2) ++ ")" 
-  show (ABegin exps) = (foldl (++) [] (intersperse " " (map show exps)))
+  show (ABegin exps) = (concat (intersperse " " (map show exps)))
   show (AIf t e1 e2) =
-    "(if " ++ (foldl (++) [] (intersperse " " (map show [t,e1,e2]))) ++ ")" 
+    "(if " ++ (concat (intersperse " " (map show [t,e1,e2]))) ++ ")" 
   show (ASymbol s _) = s
   show (ANum i) = (show i)
   show (ABoolean b) = (show b)
@@ -497,7 +498,7 @@ data RObject =
 
 -- pretty printing
 instance Show RObject where
-  show (RVector objs) = "(Vector " ++ (foldl (++) [] (map show objs)) ++ ")"
+  show (RVector objs) = "(Vector " ++ (concat (map show objs)) ++ ")"
   show (RNum i) = (show i)
   show (RClosure _ addr) = "<Closure addr:" ++ (show addr) ++ ">"
   show (RLambda addr) = "<Lambda addr:" ++ (show addr) ++ ">"
@@ -514,7 +515,7 @@ execute code =
   where
     codeLen = (length code)
     recur pc stk rstk =
-      trace (foldl (++) [] (intersperse ", " [(show pc), (show stk), (show rstk)]))
+      trace (concat (intersperse ", " [(show pc), (show stk), (show rstk)]))
       (if pc >= codeLen
        then stk
        else (inner (code !! pc) pc stk rstk))
@@ -573,12 +574,43 @@ execute code =
       (recur (pc+1) ((RNil):stk) rstk)
   
     
-main = 
-  let expr =
-        (App (App (Lambda "x" (Lambda "y" (Begin [(Symbol "y"), (Symbol "x")])))
-                   (Lambda "xbound" (Symbol "xbound")))
-                  (Lambda "ybound" (Symbol "ybound"))) in
-        --(Lambda "x" (Lambda "y" (Begin [(Symbol "y"), (Symbol "x"), (Num 5)])))
+main =
+  let goodEnough = (Lambda ["guess", "x"]
+                    (App (Symbol "<")
+                         [(App (Symbol "abs")
+                              [(App (Symbol "-")
+                               [(App (Symbol "square"),
+                                 [(Symbol "guess")]),
+                                (Symbol "x")])]),
+                          (Float 0.001)])) in
+  let average = (Lambda ["x", "y"]
+                 (App (Symbol "/")
+                      [(App (Symbol "+")
+                            [(Symbol "x"), (Symbol "y")]),
+                       (Num 2)])) in
+  let improve = (Lambda ["guess", "x"]
+                 (App average
+                      [(Copy (Symbol "guess")),
+                       (App (Symbol "/")
+                            [(Symbol "x"), (Symbol "guess")])])) in
+  
+                     
+  let sqrtIter =
+        (Lambda ["sqrtIter"]
+         (Lambda ["guess", "x"]
+          (If (App goodEnough
+               [(Copy (Symbol "guess")), (Copy (Symbol "y"))])
+              (Begin [(Symbol "x"), (Symbol "guess")])
+              (App (Symbol "sqrtIter")
+                   [(App improve [(Symbol "guess"), (Copy (Symbol "x"))]),
+                    (Symbol "x")])))) in
+
+  let sqrt = (Lambda ["x"]
+              (App sqrtIter [(Float 1.0), (Symbol "x")])) in
+
+  let expr = (App sqrt [(Num 16)]) in
+              
+  --(Lambda "x" (Lambda "y" (Begin [(Symbol "y"), (Symbol "x"), (Num 5)])))
   let renamedExpr = (renameVars expr) in
   let analyzedExpr = (analyze renamedExpr) in
   let (generatedCode, stk) = (generateCode analyzedExpr) in
