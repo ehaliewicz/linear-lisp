@@ -1,4 +1,4 @@
-import Data.List (lookup, elemIndex)
+import Data.List (lookup, elemIndex, findIndex)
 
 import Data.IORef (readIORef, modifyIORef, newIORef, IORef)
 
@@ -297,10 +297,7 @@ solve e =
       sbst
 
 
-      
-      
 
-      
 
 constraintsOf expr gctx =
   cnstr expr []
@@ -403,6 +400,11 @@ constraintsOf expr gctx =
       let ty1 = unsafePerformIO fresh in
       let ty2 = unsafePerformIO fresh in
       (ty1, ((ty, (TTimes ty1 ty2)):eq))
+
+    cnstr (Dup e) ctx =
+      let (ty1, eq) = cnstr e ctx in
+      let ty2 = unsafePerformIO fresh in
+      (ty1, ((ty2, ty1):eq))
 
 typeOf e ctx =
   let (ty, eq) = constraintsOf e ctx in
@@ -527,125 +529,151 @@ dupStack [] = error $ "Can't do dup on empty stack"
 pickStack stk idx =
   ((stk !! idx):stk)
 
+data CStackEl =
+  SVar Name | -- bound variable
+  CVar Name | -- copied variable
+  LVal        -- literal value
+  deriving (Show, Eq) 
 
-stackCheck Expr -> CEnvironment -> Boolean
+type CEnvironment = [CStackEl]
+type MEnvironment = [Value]
+
+data Inst =
+  IAdd |
+  ISub |
+  IMult |
+  IDiv |
+  IMod |
+  IEqual |
+  ILess |
+  IRoll Int |
+  IInt Int |
+  IBool Bool |
+  IClosure [Inst] |
+  IIf [Inst] [Inst] |
+  ICall |
+  IRet |
+  ICons |
+  ICar |
+  ICdr |
+  INil |
+  IDup
+  deriving (Show, Eq)
 
 
+genError msg =
+  error $ "Error during code generation: " ++ msg
 
--- type CEnvironment = [Name]
--- type MEnvironment = [Value]
+genBinOp e1 e2 env seq =
+  let (c1,env') = (codeGen e1 env) in
+  let (c2,env'') = (codeGen e2 env') in
+  ((c1 ++ c2 ++ seq), env'')
 
--- data Inst =
---   IAdd |
---   ISub |
---   IMult |
---   IDiv |
---   IEqual |
---   ILess |
---   IVar Int |
---   IInt Int |
---   IBool Bool |
---   IClosure [Inst] MEnvironment |
---   IIf [Inst] [Inst] |
---   ICall |
---   IPopEnv
---   deriving (Show, Eq)
+codeGen :: Expr -> CEnvironment -> ([Inst], CEnvironment)
 
--- compileError msg =
---   error $ "Compile-time error: " ++ msg
-
--- compBinOp e1 e2 env seq =
---   let c1 = (compile e1 env) in
---   let c2 = (compile e2 env) in
---   c1 ++ c2 ++ seq
-
--- compile :: Expr -> CEnvironment -> [Inst]
-
--- compile (Var x) env =
---   case (elemIndex x env) of
---     (Just a) -> [(IVar a)]
---     Nothing -> compileError $ "Unknown variable '" ++ x ++ "'"
+codeGen (Var x) env =
+  trace ("looking for " ++ (show x) ++ " in " ++ (show env))
+  (case (findIndex (\var ->
+                    case var of
+                      (SVar y) -> x == y
+                      _ -> False) env) of
+    (Just idx) ->
+      if idx == 0
+      then ([], (tail env))
+      else ([(IRoll idx)], (tail (rollStack env idx)))
+    Nothing -> genError $ "Unknown variable '" ++ x ++ "'")
     
--- compile (Num k) env = [(IInt k)]
+codeGen (Num k) env = ([(IInt k)], (LVal:env))
 
--- compile (Boolean b) env = [(IBool b)]
+codeGen (Boolean b) env = ([(IBool b)], (LVal:env))
 
--- compile (Times e1 e2) env =
---   compBinOp e1 e2 env [IMult]
+codeGen (Times e1 e2) env =
+  genBinOp e1 e2 env [IMult]
 
--- compile (Divide e1 e2) env =
---   compBinOp e1 e2 env [IDiv]
+codeGen (Divide e1 e2) env =
+  genBinOp e1 e2 env [IDiv]
 
--- compile (Plus e1 e2) env =
---   compBinOp e1 e2 env [IAdd]
+codeGen (Mod e1 e2) env =
+  genBinOp e1 e2 env [IMod]
 
--- compile (Minus e1 e2) env =
---   compBinOp e1 e2 env [ISub]
+codeGen (Plus e1 e2) env =
+  genBinOp e1 e2 env [IAdd]
 
--- compile (Equal e1 e2) env =
---   compBinOp 
---   (VBool $ (interpret e1 env) == (interpret e2 env))
+codeGen (Minus e1 e2) env =
+  genBinOp e1 e2 env [ISub]
 
---compile (Less e1 e2) env =
---  intBinOp e1 e2 env (<) VBool
+codeGen (Equal e1 e2) env =
+  genBinOp e1 e2 env [IEqual]
 
+codeGen (Less e1 e2) env =
+ genBinOp e1 e2 env [ILess]
 
--- interpret (If e1 e2 e3) env =
---   case (interpret e1 env) of
---     (VBool True) -> (interpret e2 env)
---     (VBool False) -> (interpret e3 env)
---     _ -> runtimeError "Expected boolean type."
+codeGen (Pair e1 e2) env =
+  let (c1, env') = codeGen e1 env in
+  let (c2, env'') = codeGen e2 env' in
+  ((c1 ++ c2 ++ [ICons]), env'')
+  
+codeGen (If t e1 e2) env =
+  let (t', env') = codeGen t env in
+  let (c1, env'') = codeGen e1 env' in
+  let (c2, env''') = codeGen e2 env'' in
+  (t'++[(IIf c1 c2)], env''')
+  
 
--- interpret (Fun n e) env =
---   (VClosure env (Fun n e))
+codeGen (Fun n e) env =
+  let (c1, env') = codeGen e ((SVar n):env) in
+  let fc = c1 ++ [IRet] in
+  let funLen = length fc in
+  ([(IClosure fc)], env')
 
-
--- interpret (Apply f o) env =
---   let o' = interpret o env in
---   let f' = interpret f env in
---   case f' of
---     (VClosure env (Fun arg expr)) -> (interpret expr ((arg,o'):env))
---     _ -> runtimeError "Expected function."
-
-
--- interpret (Pair e1 e2) env =
---   (VPair (interpret e1 env) (interpret e2 env))
-
--- interpret (Fst e1) env =
---   case (interpret e1 env) of
---     (VPair ca cd) -> ca
---     _ -> runtimeError "Expected pair."
-
--- interpret (Snd e1) env =
---   case (interpret e1 env) of
---     (VPair ca cd) -> cd
---     _ -> runtimeError "Expected pair."
-
--- interpret (Rec n e) env =
---   (interpret e ((n, (VClosure env e)):env))
-
--- interpret Nil env =
---   VNil
-
--- interpret (Cons e1 e2) env =
---   (VPair (interpret e1 env) (interpret e2 env))
-
--- interpret (Match e1 e2 x y e3) env =
---   case (interpret e1 env) of
---     VNil -> interpret e2 env
---     (VPair d1 d2) -> interpret e3 ((x,d1):(y,d2):env)
---     _ -> runtimeError "List expected in match."
+codeGen (Apply operator operand) env =
+  let (rand, env') = codeGen operand env in
+  let (rator, env'') = codeGen operator env' in
+  ((rand ++ rator ++ [ICall]), env'')
 
 
+codeGen (Fst e) env =
+  let (e', env') = codeGen e env in
+  (e' ++ [ICar], env')
 
+
+codeGen (Snd e) env =
+  let (e', env') = codeGen e env in
+  (e' ++ [ICdr], env')
+
+codeGen Nil env =
+  ([INil], (LVal:env))
+
+codeGen (Cons e1 e2) env =
+  let (c1, env') = codeGen e1 env in
+  let (c2, env'') = codeGen e2 env' in
+  ((c1++c2++[ICons]), env'')
+
+codeGen (Dup (Var x)) env =
+  trace ("looking for " ++ (show x) ++ " in " ++ (show env))
+  (case (findIndex (\var ->
+                    case var of
+                      (SVar y) -> x == y
+                      _ -> False) env) of
+    (Just idx) ->
+      if idx == 0
+      then ([IDup], env)
+      else ([(IRoll idx)], (rollStack env idx))
+    Nothing -> genError $ "Unknown variable '" ++ x ++ "'")
+    
+codeGen (Dup _) env = undefined
+  
 
 main =
   let expr = (Apply
-              (Fun "x" (Less (Var "x") (Var "x")))
-              (Num 2))
+              (Apply
+               (Fun "x"
+                (Fun "y" (Less (Var "x") (Var "x"))))
+               (Num 2))
+              (Num 3))
   in do
     
     putStrLn $ "Constraints of expr: " ++ (show $ constraintsOf expr [])
     putStrLn $ "Type of expr: " ++ (show $ typeOf expr [])
 
-    putStrLn $ "Value of expr: " ++ (show $ interpret expr []) 
+    putStrLn $ "Code of expr: " ++ (show $ codeGen expr []) 
